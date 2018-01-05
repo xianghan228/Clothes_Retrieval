@@ -1,0 +1,17 @@
+net: "./org_part_train.prototxt"
+# test_iter: 200
+# test_interval: 2000
+base_lr: 1e-3
+lr_policy: "step"
+stepsize: 40000
+gamma: 0.5
+#stepsize: 100000
+display: 50
+max_iter: 10000
+momentum: 0.9
+weight_decay: 0.0005
+snapshot: 200
+snapshot_prefix: "./models/"
+#device_id: 0
+iter_size: 2
+solver_mode: GPU

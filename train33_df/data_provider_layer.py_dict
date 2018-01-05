@@ -1,0 +1,263 @@
+import caffe
+import numpy as np
+import re, json, random
+import spacy
+import sys, os, sharedmem, time, datetime
+import multiprocessing as mp
+from multiprocessing import Array, Pool, Process, Manager
+import pdb
+from PIL import Image
+import pickle
+import copy
+
+class DataProvider:
+    def __init__(self, batchsize=64, att_dict=None,list_path=None,mean_file_path=None,new_size=227):
+        print '........init.........'
+        self.batchsize = batchsize
+        self.batch_index = None
+        self.batch_len = None
+        self.list_path=list_path
+        self.mean_file_path=mean_file_path
+        self.new_size=new_size
+        with open(att_dict,'r') as f:
+            self.att_dict = pickle.load(f)
+        self.all_img_dict=self.read_imgs()
+
+    def read_list(self):
+        """
+        Parses the list  ,format as : folder \\t label=> e.g. 2013xxx\ \\t  0 
+        Returns the  dict and path.
+        """
+        train_data={}
+        path_dict={}
+        with open(self.list_path, 'r') as f:
+            lines = f.readlines()
+        for  l_idx,line in enumerate(lines):
+            label=line.split()[1]
+            tmp_folder=(line.split()[0]).split('/')[-1]
+            train_data[tmp_folder]=int(label)
+            path_dict[tmp_folder]=(line.split()[0]).split(tmp_folder)[0]
+        #path=(line.split()[l_idx]).split(tmp_folder)[0]
+        return train_data, path_dict
+
+    def read_imgs(self):
+        print 'reading... imgs'
+        """
+        read all images return dict =>folder:[{'img_name':img,'array':img_file,'label':train_data[folder] ,'attribute':att_dict[folder],'category':img[3:5]},{},{}...]
+        """
+        if (os.path.exists('all_img_dict.pkl'))and(os.path.exists('all_img_dict.npy')):
+            imgs_dict_save=pickle.load(open('all_img_dict.pkl','r'))
+            imgs_array=np.load('all_img_dict.npy')
+            print imgs_array.shape
+            imgs_dict=copy.deepcopy(imgs_dict_save)
+            for k_idx,k in enumerate (imgs_dict):
+                for img_idx_,img_ in enumerate (imgs_dict[k]):
+                    imgs_dict[k][img_idx_]['array']=imgs_array[int(imgs_dict_save[k][img_idx_]['array']),...]
+
+        else:
+            imgs_dict={}
+            imgs_dict_save={}
+            train_data,path_dict=self.read_list()
+            mean_file=np.load(self.mean_file_path)
+            att_dict=self.att_dict
+            img_array_list=[]
+            array_idx=0
+            for folder in train_data:
+                print 'loading imgs'
+                img_names=os.listdir(os.path.join(path_dict[folder],folder))
+                imgs_dict[folder]=[]
+                imgs_dict_save[folder]=[]
+                for img in img_names:
+                    img_read_path=os.path.join(path_dict[folder],folder,img)
+                    img_file=Image.open(img_read_path)
+                    w,h=img_file.size
+                    if w!=227 or h!=227:
+                        img_file=img_file.resize((227,227))
+                    img_file=np.asarray(img_file).astype('float32')
+                    img_file=img_file[:,:,::-1]
+                    img_file=img_file.transpose(2,0,1)
+                    img_file=img_file-mean_file[0]
+                    img_file=img_file.astype(np.float32)
+                    img_array_list.append(img_file)
+                    #pdb.set_trace()
+                    #print att_dict[folder]
+                    imgs_dict_save[folder].append({'img_name':img,'array':array_idx,'label':train_data[folder] ,'attribute':att_dict[folder],'category':img[3:5]})
+                    imgs_dict[folder].append({'img_name':img,'array':img_file,'label':train_data[folder] ,'attribute':att_dict[folder],'category':img[3:5]})
+                    array_idx+=1
+            img_arrays=np.array(img_array_list)
+            with open('all_img_dict.pkl','w') as f :
+                print 'saving'
+                pickle.dump(imgs_dict_save,f)  
+            np.save('all_img_dict.npy',img_arrays)  
+        return imgs_dict
+
+    def find_same_list(self):
+        # 10 pairs per folder
+        #print 'makeing list....'
+        all_img_dict=self.all_img_dict
+        same_list=[]
+        for folder in all_img_dict:
+            len_f=len(all_img_dict[folder])
+            assert len_f >=2
+            for s_i in range(10):
+                rs=random.sample(range(len_f),2)
+                same_list.append({'folder1':folder,'folder2':folder,'img1':rs[0],'img2':rs[1]})
+        return same_list
+
+    def find_diff_list(self):
+      # 20 pairs per folder
+      diff_list=[] 
+      all_img_dict=self.all_img_dict
+      folder_list=all_img_dict.keys()
+      for folder in all_img_dict:
+        len_f=len(all_img_dict[folder])
+        assert len_f >=2
+        for d_i in range (10):
+          tmp_folder=random.sample([_ for _ in folder_list if _[3:5]==folder[3:5] if _ != folder] ,1)[0]
+          len_tmp_f=len(all_img_dict[tmp_folder])
+          for img_id in random.sample(range(len_f),2):
+            diff_list.append({'folder1':folder,'folder2':tmp_folder,'img1':img_id,'img2':random.sample(range(len_tmp_f),1)[0]})
+      return diff_list 
+
+
+    def create_batch(self,t_img_pair_list):
+        img1 =    (np.zeros(self.batchsize*3*self.new_size*self.new_size)).reshape(self.batchsize,3,self.new_size,self.new_size).astype(np.float32)
+        img2 =   (np.zeros(self.batchsize*3*self.new_size*self.new_size)).reshape(self.batchsize,3,self.new_size,self.new_size).astype(np.float32)
+        label1 =  (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        label2 =  (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr1_0 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr1_1 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr1_2 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr1_3 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr1_4 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr1_5 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr1_6 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr1_7 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+
+        attr2_0 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr2_1 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr2_2 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr2_3 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr2_4 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr2_5 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr2_6 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+        attr2_7 = (np.zeros(self.batchsize)).reshape(self.batchsize).astype(np.float32)
+
+
+        all_img_dict=self.all_img_dict
+        #imgs_dict[folder].append({'img_name':img,'array':img_file,'label':train_data[folder] ,'attribute':att_dict[folder],'category':img[3:5]})
+        for idx,t_img_pair in enumerate(t_img_pair_list):
+            t_folder1= t_img_pair['folder1']
+            t_folder2= t_img_pair['folder2']
+            t_img_idx_1=t_img_pair['img1']
+            t_img_idx_2=t_img_pair['img2']
+
+
+            img1   [idx,...] =   all_img_dict[t_folder1][t_img_idx_1]['array']
+            img2   [ idx,...] =  all_img_dict[t_folder2][t_img_idx_2]['array']
+            label1 [ idx,...] =  all_img_dict[t_folder1][t_img_idx_1]['label']
+            label2 [ idx,...] =  all_img_dict[t_folder2][t_img_idx_2]['label']
+            attr1_0[ idx,...] ,\
+            attr1_1[ idx,...] ,\
+            attr1_2[ idx,...] ,\
+            attr1_3[ idx,...] ,\
+            attr1_4[ idx,...] ,\
+            attr1_5[ idx,...] ,\
+            attr1_6[ idx,...] ,\
+            attr1_7[ idx,...] =np.array(all_img_dict[t_folder1][t_img_idx_1]['attribute']).astype(np.float32)
+
+            attr2_0[ idx,...] ,\
+            attr2_1[ idx,...] ,\
+            attr2_2[ idx,...] ,\
+            attr2_3[ idx,...] ,\
+            attr2_4[ idx,...] ,\
+            attr2_5[ idx,...] ,\
+            attr2_6[ idx,...] ,\
+            attr2_7[ idx,...] =np.array(all_img_dict[t_folder2][t_img_idx_2]['attribute']).astype(np.float32)
+
+        return img1,img2,label1,label2,attr1_0,attr1_1,attr1_2,attr1_3,attr1_4,attr1_5,attr1_6,attr1_7,attr2_0,attr2_1,attr2_2,attr2_3,attr2_4,attr2_5,attr2_6,attr2_7
+ 
+    def get_batch_vec(self):
+        #print 'get batch vec'
+        if self.batch_len is None:
+            same_list=self.find_same_list()
+            diff_list=self.find_diff_list()
+            same_list.extend(diff_list)
+            img_pair_list=same_list
+            random.shuffle(img_pair_list)
+            self.img_pair_list = img_pair_list
+            self.batch_len = len(same_list)
+            print 'img pair len: ',len(same_list)
+            self.batch_index = 0
+            self.epoch_counter = 0
+
+        counter = 0
+        t_img_pair_list = []
+        while counter < self.batchsize:
+            t_id = self.img_pair_list[self.batch_index]
+            t_img_pair_list.append(t_id)
+            counter += 1
+
+            if self.batch_index < self.batch_len-1:
+                self.batch_index += 1
+            else:
+                same_list=self.find_same_list()
+                diff_list=self.find_diff_list()
+                same_list.extend(diff_list)
+                img_pair_list=same_list
+                self.epoch_counter += 1
+                random.shuffle(img_pair_list)
+                self.img_pair_list = img_pair_list
+                self.batch_index = 0
+
+        t_batch = self.create_batch(t_img_pair_list)
+        return t_batch + (t_img_pair_list, self.epoch_counter)
+
+class DataProviderLayer(caffe.Layer):
+
+    """
+    Provide input data for contrastive loss and attribute loss
+    """
+    
+    def setup(self, bottom, top):
+      '''
+      top 0 img1                batchsize 3 h w
+      top 1 img2 
+      top 2 label 1             batchsize 
+      top 3 label 2
+      top 4 attribute 1         batchsize attributenum
+      top 5 attribute 2
+      [27,  6, 39,  1, 20, 17, 13,  4]
+      '''
+      print json.loads(self.param_str)
+      self.batchsize = json.loads(self.param_str)['batchsize']
+      self.new_size =   json.loads(self.param_str)['newsize']
+      self.att_num =   json.loads(self.param_str)['att_num']
+      #self.att_maxlabel = json.loads(self.param_str)['att_maxlabel']
+      self.att_dict =  json.loads(self.param_str)['att_dict']
+      self.list_path=  json.loads(self.param_str)['list_path']
+      self.mean_file= json.loads(self.param_str)['mean_file_path']
+
+
+      self.top_names = ['img1','img2','label1','label2']+['attr1_{}'.format(i_) for i_ in range(self.att_num)]+['attr2_{}'.format(i_) for i_ in range(self.att_num)]
+      top[0].reshape(self.batchsize,3,self.new_size,self.new_size)
+      top[1].reshape(self.batchsize,3,self.new_size,self.new_size)
+      top[2].reshape(self.batchsize)
+      top[3].reshape(self.batchsize)
+      for i  in range(self.att_num*2):
+        top[4+i].reshape(self.batchsize)
+
+      self.dp = DataProvider(batchsize=self.batchsize, att_dict=self.att_dict,list_path=self.list_path,mean_file_path=self.mean_file,new_size=self.new_size)
+
+    def reshape(self, bottom, top):
+      pass
+
+    def forward(self, bottom, top):
+      #img1,img2,label1,label2,attr1_0,attr1_1,attr1_2,attr1_3,attr1_4,attr1_5,attr1_6,attr1_7,attr2_0,attr2_1,attr2_2,attr2_3,attr2_4,attr2_5,attr2_6,attr2_7, _, _, _ = self.dp.get_batch_vec()
+      top_list = self.dp.get_batch_vec()
+      for i_ in range(4+self.att_num*2):
+        top[i_].data[...] =top_list[i_] 
+
+    def backward(self, top, propagate_down, bottom):
+      pass
+

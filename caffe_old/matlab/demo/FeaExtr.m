@@ -1,0 +1,14 @@
+list_im='/home/iva/Documents/MATLAB/VGG/query_73_rgb_list.txt';
+img_dir='/home/iva/Documents/MATLAB/VGG/';
+dim=4096;
+IMAGE_DIM=224;
+use_gpu=1;
+[scores] = matcaffe_batch(list_im, use_gpu,dim,IMAGE_DIM,img_dir);
+feature=scores';
+fid=fopen('/home/iva/Documents/MATLAB/VGG/query_73_rgb_57.txt','r');
+p=textscan(fid,'%s %d');
+picname=p{1};
+label=p{2};
+fclose(fid);
+c={picname,feature,label};
+save('/home/iva/Documents/MATLAB/Evaluation/Feature/vgg19_rgb_73/query_rgb_73_vgg19_multi-loss-1-2-6k.mat','c');

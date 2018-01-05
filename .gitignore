@@ -1,0 +1,12 @@
+*.pyc
+*.pkl
+*.csv
+.log*
+*.caffemodel
+*.solverstate
+*.npz
+*.npy
+*.jpg
+*.txt
+!*.py
+!*.prototxt
